@@ -2,6 +2,10 @@ package com.nefislokanta.mobil
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.webkit.CookieManager
@@ -16,11 +20,16 @@ import android.graphics.Color
 import android.view.Gravity
 import android.view.KeyEvent
 import android.webkit.WebSettings
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
 
 class MainActivity : Activity() {
     private lateinit var webView: WebView
     private lateinit var progress: ProgressBar
     private val panelUrl = "https://nefislokanta.com/mobil/"
+    private val updateManifestUrl = "https://nefislokanta.com/wp-json/nefis-mobil/v1/app-update"
+    private var updateDialogShown = false
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -60,13 +69,78 @@ class MainActivity : Activity() {
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val uri = request.url
-                // Keep the app within the site's secure mobile panel. External links open in the system browser.
                 if (uri.scheme == "https" && uri.host == "nefislokanta.com") return false
                 Toast.makeText(this@MainActivity, "Bu bağlantı uygulama dışında açılmalı.", Toast.LENGTH_SHORT).show()
                 return true
             }
         }
         if (savedInstanceState == null) webView.loadUrl(panelUrl) else webView.restoreState(savedInstanceState)
+
+        // Version check runs in the background and never blocks the menu panel.
+        checkForAppUpdate()
+    }
+
+    private fun checkForAppUpdate() {
+        Thread {
+            var connection: HttpURLConnection? = null
+            try {
+                connection = (URL(updateManifestUrl).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 5000
+                    readTimeout = 5000
+                    setRequestProperty("Accept", "application/json")
+                    setRequestProperty("Cache-Control", "no-cache")
+                }
+                if (connection.responseCode !in 200..299) return@Thread
+                val body = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                val json = JSONObject(body)
+                val latestCode = json.optInt("versionCode", 0)
+                val latestName = json.optString("versionName", "")
+                val apkUrl = json.optString("apkUrl", "")
+                val changelog = json.optString("changelog", "")
+                val currentCode = if (Build.VERSION.SDK_INT >= 28) {
+                    packageManager.getPackageInfo(packageName, 0).longVersionCode.toInt()
+                } else {
+                    @Suppress("DEPRECATION")
+                    packageManager.getPackageInfo(packageName, 0).versionCode
+                }
+                if (latestCode > currentCode && apkUrl.startsWith("https://") && latestName.isNotBlank()) {
+                    runOnUiThread { showUpdateDialog(latestName, apkUrl, changelog) }
+                }
+            } catch (_: Exception) {
+                // Offline/server error: continue opening the app normally.
+            } finally {
+                connection?.disconnect()
+            }
+        }.start()
+    }
+
+    private fun showUpdateDialog(versionName: String, apkUrl: String, changelog: String) {
+        if (isFinishing || updateDialogShown) return
+        updateDialogShown = true
+        val message = buildString {
+            append("Yeni NefisMobil sürümü (")
+            append(versionName)
+            append(") hazır.")
+            if (changelog.isNotBlank()) {
+                append("\n\nYenilikler:\n")
+                append(changelog)
+            }
+            append("\n\nGüncelle'ye dokunarak APK indirme sayfasını açın. Android kurulumu onaylamanızı isteyebilir.")
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Uygulama güncellemesi")
+            .setMessage(message)
+            .setCancelable(true)
+            .setPositiveButton("Güncelle") { _, _ ->
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(apkUrl)))
+                } catch (_: Exception) {
+                    Toast.makeText(this, "APK bağlantısı açılamadı. Nefis Mobil Menü ayarlarını kontrol edin.", Toast.LENGTH_LONG).show()
+                }
+            }
+            .setNegativeButton("Şimdi değil", null)
+            .show()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
